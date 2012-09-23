@@ -2,7 +2,6 @@ package base62
 
 import (
   "io"
-  "log"
 )
 
 type reader struct {
@@ -13,7 +12,7 @@ type reader struct {
   err error
 }
 
-var masks = [8]byte{0x00, 0x01, 0x03, 0x07, 0x1f, 0x3f, 0x7f, 0xff}
+var masks = [...]byte{0x00, 0x01, 0x03, 0x07, 0xf, 0x1f, 0x3f, 0x7f, 0xff}
 
 // Fill up internal buffers from the Reader
 func (r *reader) fill() bool {
@@ -51,7 +50,6 @@ func (r *reader) read(n uint) (uint, uint, error) {
     // bits left in buf[q]
     j := 8 - i
 
-    log.Printf("off = %d, num = %d, q = %d, i = %d, j = %d, buf[q] = %d, buf = %v\n", r.off, r.num, q, i, j, r.buf[q], r.buf)
     // can we satisfy n from the buf[q]?
     if n <= j {
       v := uint(masks[n] & (r.buf[q] >> uint(j-n)))
