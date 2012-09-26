@@ -4,123 +4,143 @@ import (
   "io"
 )
 
-type reader struct {
-  r   io.Reader
-  buf [1024]byte
-  off uint // in bits
-  num uint // in bits
-  err error
+var masks = [...]uint{0x00, 0x01, 0x03, 0x07, 0xf, 0x1f, 0x3f, 0x7f, 0xff}
+
+const syms = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+type encoder struct {
+  w io.Writer
+
+  // fragment of bits left from the last write
+  buf uint
+
+  // number of bits left in buf
+  num uint
+
+  // This represents a carry state in the encoder where a single bit is
+  // being pushed into the next 6-bit word. The least significant bit
+  // indicates the bit value of the carry and the next significant bit
+  // indicates whether there is a carry at all. Examples:
+  // 0x0 - no carry
+  // 0x3 - carry of 1
+  // 0x2 - carry of 0
+  car uint
 }
 
-var masks = [...]byte{0x00, 0x01, 0x03, 0x07, 0xf, 0x1f, 0x3f, 0x7f, 0xff}
-
-// Fill up internal buffers from the Reader
-func (r *reader) fill() bool {
-  if r.off >= r.num {
-    if r.err != nil {
-      return false
-    }
-
-    // TODO(knorton): Handle case where r.r is nil
-    n, err := io.ReadAtLeast(r.r, r.buf[:], 1)
-    r.off = 0
-    r.num = uint(n) * 8
-    r.err = err
-    return r.num > 0
-  }
-  return true
+// Combine an bits of av with bn bits of bv to get a word with an + bn bits.
+func concat(av, an, bv, bn uint) uint {
+  return ((av & masks[an]) << bn) | (bv & masks[bn])
 }
 
-// Reads n bits from the underlying reader.
-func (r *reader) read(n uint) (uint, uint, error) {
+// Read n bits from p. 
+func readBits(e *encoder, n uint, p []byte) (uint, uint, []byte) {
+  // log.Printf("Read %x bits\n", n)
   var rv uint = 0
   var rn uint = 0
 
   for n > 0 {
-    if !r.fill() {
-      return rv, rn, r.err
-    }
-
-    // index of buf to use
-    q := r.off >> 3
-
-    // how many bits have been read in buf[q]
-    i := r.off & 7
-
-    // bits left in buf[q]
-    j := 8 - i
-
-    // can we satisfy n from the buf[q]?
-    if n <= j {
-      v := uint(masks[n] & (r.buf[q] >> uint(j-n)))
+    // can we finish this read from buf?
+    if e.num >= n {
+      // read upper n bits of buf
+      v := masks[n] & (e.buf >> (e.num - n))
+      e.num -= n
       rv <<= n
       rv |= v
       rn += n
-      r.off += n
-      return rv, rn, r.err
+      return rv, rn, p
     }
 
-    v := uint(masks[j] & r.buf[q])
-    rv |= v << rn
-    rn += j
-    r.off += j
-    n -= j
+    // can we make this read at all?
+    if len(p) == 0 {
+      return 0, 0, p
+    }
+
+    // read what is left in buf and bring in more bits from p
+    v := masks[e.num] & e.buf
+    rv |= v
+    rn += e.num
+
+    n -= e.num
+
+    e.num = 8
+
+    e.buf = uint(p[0])
+    p = p[1:]
   }
 
   panic("unreachable")
 }
 
-// type writer struct {
-//   buf []byte
-//   n   int
-//   w   io.Writer
-// }
+// Encode a 6-bit word into a character, emit it on the writer and return
+// the carry state.
+func encode6Bits(e *encoder, v uint) (uint, error) {
+  // log.Printf("Encode: %x\n", v)
+  if v < 60 {
+    if _, err := e.w.Write([]byte{syms[v]}); err != nil {
+      return 0, err
+    }
+    return 0, nil
+  }
+  if v < 62 {
+    if _, err := e.w.Write([]byte{syms[60]}); err != nil {
+      return 0, err
+    }
+  } else {
+    if _, err := e.w.Write([]byte{syms[61]}); err != nil {
+      return 0, err
+    }
+  }
+  return (v & 1) | 2, nil
+}
 
-// // Write these bits into the buffer
-// func (w *writer) writeBits(v, int) {
-// }
+func (e *encoder) Write(p []byte) (int, error) {
+  c := len(p)
+  if c == 0 {
+    return 0, nil
+  }
+  var v uint
+  var n uint
+  var err error
+  for {
+    if e.car&2 == 0 {
+      v, n, p = readBits(e, 6, p)
+      if n == 0 {
+        return c, nil
+      }
+      e.car, err = encode6Bits(e, v)
+      if err != nil {
+        return c - len(p), err
+      }
+    } else {
+      v, n, p = readBits(e, 5, p)
+      if n == 0 {
+        return c, nil
+      }
+      e.car, err = encode6Bits(e, concat(e.car&1, 1, v, 5))
+      if err != nil {
+        return c - len(p), err
+      }
+    }
+  }
+  panic("unreachable")
+}
 
-// func (w *writer) commit() (n, error) {
-//   return 0, nil
-// }
+func (e *encoder) Close() error {
+  if e.num == 0 && e.car&2 == 0 {
+    return nil
+  }
+  if e.car&2 == 0 {
+    if _, err := encode6Bits(e, e.buf&masks[e.num]<<(6-e.num)); err != nil {
+      return err
+    }
+  } else {
+    if _, err := encode6Bits(e, concat(e.car&1, 1, e.buf&masks[e.num]<<(5-e.num), 5)); err != nil {
+      return err
+    }
+  }
+  return nil
+}
 
-// const symbols = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-
-// type Encoding struct {
-//   sym string
-//   pos map[byte]int
-// }
-
-// func NewEncoding(symbols string) *Encoding {
-//   e := new(Encoding)
-//   e.sym = symbols
-//   pos := make(map[byte]int)
-//   for i := 0; i < len(symbols); i++ {
-//     pos[symbols[i]] = i
-//   }
-//   e.pos = pos
-//   return e
-// }
-
-// func (e *Encoding) Encode(dst, src []byte) {
-// }
-
-// func (e *Encoding) Decode(dst, src []byte) (int, error) {
-//   return 0, nil
-// }
-
-// func NewDecoder(r io.Reader) io.Reader {
-//   return nil
-// }
-
-// func NewEncoder(w io.Writer) io.Writer {
-//   return nil
-// }
-
-// func EncodeToString(src []byte) string {
-//   return nil
-// }
-
-// func DecodeString(src string) ([]byte, error) {
-//   return nil, nil
-// }
+func NewEncoder(w io.Writer) io.WriteCloser {
+  return &encoder{w: w}
+}
