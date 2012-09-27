@@ -3,6 +3,7 @@ package base62
 import (
   "bytes"
   "io"
+  "log"
   "testing"
 )
 
@@ -24,6 +25,19 @@ func TestEncoding(t *testing.T) {
       t.Fatalf("expected %s got %s (for %v)", trial.encoded, b.String(), trial.decoded)
     }
 
+  }
+}
+
+func TestDecoding(t *testing.T) {
+  for _, trial := range trials {
+    log.Printf("Trial: %s\n", trial.encoded)
+    var b bytes.Buffer
+    d := NewDecoder(bytes.NewBufferString(trial.encoded))
+    if _, err := io.Copy(&b, d); err != nil {
+      t.Fatalf("%v\n", err)
+    }
+
+    log.Printf("%v\n%v\n\n", trial.decoded, b.Bytes())
   }
 }
 

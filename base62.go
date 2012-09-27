@@ -229,5 +229,5 @@ func NewEncoder(w io.Writer) io.WriteCloser {
 }
 
 func NewDecoder(r io.Reader) io.Reader {
-  return nil
+  return &decoder{r: r}
 }
