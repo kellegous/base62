@@ -1,13 +1,21 @@
 package base62
 
 import (
+  "errors"
+  "fmt"
   "io"
 )
 
 var masks = [...]uint{0x00, 0x01, 0x03, 0x07, 0xf, 0x1f, 0x3f, 0x7f, 0xff}
 
-const syms = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+var encoding = newEncoding("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
+type enc struct {
+  chr string
+  pos map[byte]uint
+}
+
+// TODO(knorton): Add an output buffer
 type encoder struct {
   w io.Writer
 
@@ -25,6 +33,26 @@ type encoder struct {
   // 0x3 - carry of 1
   // 0x2 - carry of 0
   car uint
+}
+
+type decoder struct {
+  r io.Reader
+
+  rb [1024]byte
+
+  // fragment of written bits
+  buf uint
+
+  // bits written into buf
+  num uint
+}
+
+func newEncoding(chr string) *enc {
+  p := map[byte]uint{}
+  for i := 0; i < len(chr); i++ {
+    p[chr[i]] = uint(i)
+  }
+  return &enc{chr, p}
 }
 
 // Combine an bits of av with bn bits of bv to get a word with an + bn bits.
@@ -74,19 +102,19 @@ func readBits(e *encoder, n uint, p []byte) (uint, uint, []byte) {
 // Encode a 6-bit word into a character, emit it on the writer and return
 // the carry state.
 func encode6Bits(e *encoder, v uint) (uint, error) {
-  // log.Printf("Encode: %x\n", v)
+  chr := encoding.chr
   if v < 60 {
-    if _, err := e.w.Write([]byte{syms[v]}); err != nil {
+    if _, err := e.w.Write([]byte{chr[v]}); err != nil {
       return 0, err
     }
     return 0, nil
   }
   if v < 62 {
-    if _, err := e.w.Write([]byte{syms[60]}); err != nil {
+    if _, err := e.w.Write([]byte{chr[60]}); err != nil {
       return 0, err
     }
   } else {
-    if _, err := e.w.Write([]byte{syms[61]}); err != nil {
+    if _, err := e.w.Write([]byte{chr[61]}); err != nil {
       return 0, err
     }
   }
@@ -141,6 +169,65 @@ func (e *encoder) Close() error {
   return nil
 }
 
+func writeBits(d *decoder, r *[]byte, w *[]byte, v uint, n uint) {
+  // how many bits are left in our 1-byte buffer
+  l := 8 - d.num
+
+  // will we fill up buf in this write?
+  if n >= l {
+    (*w)[0] = byte(d.buf | (v & masks[l-n]))
+    d.buf = uint((*r)[0])
+    d.num = 0
+
+    n -= l
+    *r = (*r)[1:]
+    *w = (*w)[1:]
+  }
+
+  if n == 0 {
+    return
+  }
+
+  // put what is left in buf
+  d.buf |= (v & masks[n]) << (l - n)
+  d.num += n
+}
+
+func (d *decoder) Read(p []byte) (int, error) {
+  nn := len(p)
+  nr := nn
+  if nr > len(d.rb) {
+    nr = len(d.rb)
+  }
+
+  q := d.rb[:nr]
+  n, err := io.ReadAtLeast(d.r, q, 1)
+  if err != nil && err != io.EOF {
+    return 0, err
+  }
+
+  for i := 0; i < n; i++ {
+    c := d.rb[i]
+    pos, ok := encoding.pos[c]
+    if !ok {
+      return 0, errors.New(fmt.Sprintf("illegal character %d\n", c))
+    }
+    switch pos {
+    case 60:
+      writeBits(d, &p, &q, 0x1e, 5)
+    case 61:
+      writeBits(d, &p, &q, 0x1f, 5)
+    default:
+      writeBits(d, &p, &q, pos, 6)
+    }
+  }
+  return nn - len(p), err
+}
+
 func NewEncoder(w io.Writer) io.WriteCloser {
   return &encoder{w: w}
+}
+
+func NewDecoder(r io.Reader) io.Reader {
+  return nil
 }
