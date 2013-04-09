@@ -40,6 +40,8 @@ func TestDecoding(t *testing.T) {
 	}
 }
 
+// TODO(knorton): These trials were created through the Java version of the encoder. I need to
+// normalize these, remove duplicates and commit them to a external data file.
 var trials = []*trial{
 	&trial{
 		[]byte{0},
